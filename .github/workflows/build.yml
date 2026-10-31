@@ -1,0 +1,62 @@
+name: Сборка exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Установка через «Запустить.bat», как у пользователя
+        run: |
+          cmd /c "Запустить.bat <nul"
+          if (-not (Test-Path .venv\installed.ok)) { throw "Запустить.bat не установил компоненты" }
+          Start-Sleep -Seconds 5
+          Stop-Process -Name pythonw -ErrorAction SilentlyContinue
+
+      - name: Чтение аудио через встроенный ffmpeg
+        run: |
+          .venv\Scripts\python.exe -c "import wave, math, struct; w = wave.open('test.wav', 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(i / 16000 * 2 * math.pi * 440))) for i in range(16000 * 20))); w.close()"
+          .venv\Scripts\python.exe -c "import checker; pcm = checker.decode_audio('test.wav'); assert len(pcm) > 16000 * 2 * 19, len(pcm); print('decoded', len(pcm), 'bytes')"
+
+      - name: Запрос к Shazam (не блокирует сборку)
+        continue-on-error: true
+        timeout-minutes: 8
+        run: .venv\Scripts\python.exe checker.py test.wav fast
+
+      - name: Сборка через «Собрать exe.bat»
+        run: |
+          cmd /c "Собрать exe.bat <nul"
+          if (-not (Test-Path dist\CopyrightCheck.exe)) { throw "exe не собран" }
+          Get-Item dist\CopyrightCheck.exe | Format-List Name, Length
+
+      - name: Пробный запуск exe
+        continue-on-error: true
+        run: |
+          Start-Process dist\CopyrightCheck.exe
+          Start-Sleep -Seconds 20
+          Get-Process CopyrightCheck -ErrorAction SilentlyContinue | Format-Table Id, MainWindowTitle
+          Stop-Process -Name CopyrightCheck -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CopyrightCheck
+          path: dist/CopyrightCheck.exe
+
+      - name: Релиз
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME dist/CopyrightCheck.exe --title "Проверка авторских прав $env:GITHUB_REF_NAME" --notes "Скачайте CopyrightCheck.exe и запустите. Python не нужен. Windows может предупредить о неизвестном издателе: «Подробнее» → «Выполнить в любом случае»."

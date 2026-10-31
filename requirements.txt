@@ -1,0 +1,3 @@
+shazamio==0.9.0
+PySide6-Essentials==6.12.0
+imageio-ffmpeg==0.7.0
