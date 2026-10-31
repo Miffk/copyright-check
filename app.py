@@ -187,6 +187,10 @@ class Timeline(QWidget):
 
 
 VPN_HINT = "В России Shazam может быть недоступен без VPN — включите VPN и проверьте файл ещё раз."
+VPN_MODE_HINT = (
+    "Если VPN уже включён, включите в VPN-клиенте режим, при котором через VPN идёт весь трафик: "
+    "он называется TUN, «Весь трафик» или «Системный VPN». Либо включите в клиенте "
+    "«Системный прокси» (System proxy) с HTTP-портом — программа подхватит его сама.")
 
 
 def eta_text(seconds: float) -> str:
@@ -236,13 +240,15 @@ def result_html(result: checker.CheckResult, wait: int | None = None) -> str:
     if wait is not None:
         return "".join(parts)
     total = len(result.segments)
-    error = f"<p style='color:gray'>Текст ошибки: {e(result.error_text)}</p>" if result.error_text else ""
+    route = f"через прокси {e(result.proxy)}" if result.proxy else "напрямую, системный прокси не найден"
+    error = (f"<p style='color:gray'>Подключение: {route}.<br>Текст ошибки: {e(result.error_text)}</p>"
+             if result.error_text else "")
     if result.checked_ok == 0 and not result.rate_limited:
         return (
             f"<h2 style='color:{COLOR_WEAK.name()}'>Проверка не выполнена</h2>"
             "<p>Не удалось связаться с сервером Shazam, поэтому ни один фрагмент не проверен. "
             "Результата нет: это <b>не</b> значит, что чужой музыки в файле нет.</p>"
-            f"<p><b>{VPN_HINT}</b></p>{error}")
+            f"<p><b>{VPN_HINT}</b></p><p>{VPN_MODE_HINT}</p>{error}")
     if not result.matches:
         if result.errors:
             parts.append(f"<h2 style='color:{COLOR_WEAK.name()}'>Совпадений не найдено "

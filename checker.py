@@ -13,6 +13,7 @@ import math
 import subprocess
 import sys
 import time
+import urllib.request
 import wave
 from dataclasses import dataclass, field
 from typing import Callable
@@ -87,6 +88,7 @@ class CheckResult:
     matches: list[Match]
     rate_limited: bool = False
     unreachable: bool = False  # Shazam не ответил ни разу — нет связи или блокировка
+    proxy: str = ""  # через какой прокси шли запросы, пусто — напрямую
     eta: float = 0  # сколько примерно секунд осталось
 
     @property
@@ -189,6 +191,22 @@ def group_matches(segments: list[Segment]) -> list[Match]:
     return sorted(matches.values(), key=lambda m: m.ranges[0][0])
 
 
+def system_proxy() -> str:
+    """HTTP-прокси из настроек Windows (или переменных окружения).
+
+    Многие VPN-клиенты (v2rayN, Hiddify, Clash, Happ) по умолчанию не заворачивают
+    весь трафик, а включают системный прокси. urllib его видит сам, aiohttp — нет,
+    и без этого запросы к Shazam шли бы в обход VPN.
+    """
+    proxies = urllib.request.getproxies()
+    for key in ("https", "http"):
+        url = proxies.get(key, "")
+        if url.startswith(("http://", "https://")):
+            # Локальные прокси VPN-клиентов принимают обычный HTTP
+            return "http://" + url.split("://", 1)[1].rstrip("/")
+    return ""
+
+
 class RateLimiter:
     """Ведро токенов под лимит Shazam. Одно на весь сеанс, чтобы следующий
     файл в очереди не начинал с отказа."""
@@ -255,7 +273,8 @@ async def _recognize_all(
                 await pause(limiter.wait_time())
                 limiter.take()
                 try:
-                    seg.track = parse_track(await shazam.recognize(to_wav(chunk)))
+                    answer = await shazam.recognize(to_wav(chunk), proxy=result.proxy or None)
+                    seg.track = parse_track(answer)
                     seg.error = ""
                     break
                 except RateLimited:
@@ -295,6 +314,7 @@ def check_file(
     pcm = decode_audio(path)
     duration = len(pcm) / BYTES_PER_SECOND
     result = CheckResult(path, duration, plan_segments(duration, MODES[mode]), [])
+    result.proxy = system_proxy()
     result.eta = limiter.eta(len(result.segments))
     progress(result, 0)
     asyncio.run(_recognize_all(pcm, result, progress, cancelled))
