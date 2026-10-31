@@ -18,6 +18,7 @@ import wave
 from dataclasses import dataclass, field
 from typing import Callable
 
+import aiohttp
 import imageio_ffmpeg
 from aiohttp_retry import ExponentialRetry
 from shazamio import RateLimited, Shazam
@@ -89,6 +90,7 @@ class CheckResult:
     rate_limited: bool = False
     unreachable: bool = False  # Shazam не ответил ни разу — нет связи или блокировка
     proxy: str = ""  # через какой прокси шли запросы, пусто — напрямую
+    internal_error: bool = False  # сбой в самой программе, а не в сети
     eta: float = 0  # сколько примерно секунд осталось
 
     @property
@@ -286,8 +288,12 @@ async def _recognize_all(
                         report()
                         return
                     limiter.penalize(strikes)
-                except Exception as exc:  # сеть и прочее: фрагмент пропускаем
+                except (aiohttp.ClientError, OSError) as exc:  # сеть: фрагмент пропускаем
                     seg.error = str(exc) or exc.__class__.__name__
+                    break
+                except Exception as exc:  # ошибка в программе, а не в сети
+                    seg.error = f"{exc.__class__.__name__}: {exc}"
+                    result.internal_error = True
                     break
             seg.checked = True
             if seg.error and i >= 1 and result.checked_ok == 0:
@@ -329,7 +335,8 @@ def report_text(result: CheckResult) -> str:
         "",
     ]
     if result.checked_ok == 0:
-        lines.append("ПРОВЕРКА НЕ ВЫПОЛНЕНА: не удалось связаться с Shazam.")
+        reason = "ошибка в программе" if result.internal_error else "не удалось связаться с Shazam"
+        lines.append(f"ПРОВЕРКА НЕ ВЫПОЛНЕНА: {reason}.")
         lines.append(f"Ошибка: {result.error_text}")
         return "\n".join(lines)
     if result.matches:

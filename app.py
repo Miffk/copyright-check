@@ -243,6 +243,14 @@ def result_html(result: checker.CheckResult, wait: int | None = None) -> str:
     route = f"через прокси {e(result.proxy)}" if result.proxy else "напрямую, системный прокси не найден"
     error = (f"<p style='color:gray'>Подключение: {route}.<br>Текст ошибки: {e(result.error_text)}</p>"
              if result.error_text else "")
+    if result.checked_ok == 0 and result.internal_error:
+        return (
+            f"<h2 style='color:{COLOR_WEAK.name()}'>Проверка не выполнена: ошибка в программе</h2>"
+            "<p>Это не проблема с интернетом или VPN, а сбой в самой программе. Результата нет: "
+            "это <b>не</b> значит, что чужой музыки в файле нет.</p>"
+            "<p>Нажмите «Проверить обновления» внизу окна: возможно, ошибка уже исправлена. "
+            "Если нет — отправьте разработчику текст ошибки ниже.</p>"
+            f"{error}")
     if result.checked_ok == 0 and not result.rate_limited:
         return (
             f"<h2 style='color:{COLOR_WEAK.name()}'>Проверка не выполнена</h2>"
@@ -730,6 +738,8 @@ class MainWindow(QMainWindow):
             strong = sum(1 for m in result.matches if not m.weak)
             text = f"⚠ Найдено треков: {len(result.matches)}"
             color = COLOR_MATCH if strong else COLOR_WEAK
+        elif result.checked_ok == 0 and result.internal_error:
+            text, color = "Ошибка программы", COLOR_WEAK
         elif result.checked_ok == 0 and not result.rate_limited:
             text, color = "Нет связи с Shazam", COLOR_WEAK
         elif result.errors:
@@ -863,7 +873,48 @@ STYLE = """
 """
 
 
+def selftest(report_path: str) -> int:
+    """Проверка всего пути внутри собранного exe: поиск → отрывок → распознавание.
+
+    Запуск: CopyrightCheck.exe --selftest отчёт.txt. Код выхода 0 — всё работает."""
+    import tempfile
+    import traceback
+    import urllib.request
+
+    lines = [f"Версия {__version__}, Python {sys.version.split()[0]}, прокси: {checker.system_proxy() or 'нет'}"]
+    ok = True
+
+    def step(name, func):
+        nonlocal ok
+        try:
+            lines.append(f"[ok] {name}: {func()}")
+        except Exception:
+            ok = False
+            lines.append(f"[FAIL] {name}:\n{traceback.format_exc()}")
+
+    found = []
+    step("поиск в Deezer", lambda: found.extend(search.search_tracks("Imagine Dragons Believer", 3))
+         or f"{found[0].artist} — {found[0].title}, {found[0].label}")
+    step("проверка обновлений", lambda: f"последняя версия {updater.latest_release().version}")
+
+    def recognize():
+        preview = Path(tempfile.gettempdir()) / "copyrightcheck_selftest.mp3"
+        urllib.request.urlretrieve(found[0].preview, preview)
+        result = checker.check_file(str(preview), "fast")
+        preview.unlink(missing_ok=True)
+        if not result.matches:
+            raise RuntimeError(checker.report_text(result))
+        return ", ".join(f"{m.track.artist} — {m.track.title}" for m in result.matches)
+
+    if found:
+        step("распознавание отрывка через Shazam", recognize)
+    Path(report_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return 0 if ok else 1
+
+
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
+        sys.exit(selftest(sys.argv[2]))
     updater.cleanup_previous()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)

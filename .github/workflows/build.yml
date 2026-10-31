@@ -23,6 +23,9 @@ jobs:
         run: |
           cmd /c "Запустить.bat <nul"
           if (-not (Test-Path .venv\installed.ok)) { throw "Запустить.bat не установил компоненты" }
+          $pyver = .venv\Scripts\python.exe -c "import sys; print('%d.%d' % sys.version_info[:2])"
+          Write-Output "Python в .venv: $pyver"
+          if ($pyver -ne "3.13") { throw "Запустить.bat выбрал Python $pyver вместо 3.13" }
           Start-Sleep -Seconds 5
           Stop-Process -Name pythonw -ErrorAction SilentlyContinue
 
@@ -41,6 +44,13 @@ jobs:
           '' | & '.\Собрать exe.bat'
           if (-not (Test-Path dist\CopyrightCheck.exe)) { throw "exe не собран" }
           Get-Item dist\CopyrightCheck.exe | Format-List Name, Length
+
+      - name: Самопроверка внутри exe (поиск, распознавание, обновления)
+        timeout-minutes: 8
+        run: |
+          $p = Start-Process dist\CopyrightCheck.exe -ArgumentList '--selftest', "$pwd\selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt -Encoding utf8
+          if ($p.ExitCode -ne 0) { throw "Самопроверка exe не прошла (код $($p.ExitCode))" }
 
       - name: Пробный запуск exe
         continue-on-error: true

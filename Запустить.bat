@@ -6,8 +6,11 @@ if exist ".venv\installed.ok" goto run
 
 echo Первый запуск: устанавливаю нужные компоненты. Это займёт 1-3 минуты...
 echo.
+rem С Python 3.15 собранный exe не может обратиться к Shazam, берём 3.13 или 3.12, если есть
 set "PY="
-where py >nul 2>nul && set "PY=py -3"
+py -3.13 --version >nul 2>nul && set "PY=py -3.13"
+if not defined PY py -3.12 --version >nul 2>nul && set "PY=py -3.12"
+if not defined PY py -3 --version >nul 2>nul && set "PY=py -3"
 if not defined PY where python >nul 2>nul && set "PY=python"
 if not defined PY goto nopython
 
