@@ -12,6 +12,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"  # консоль раннера в cp1252, русский вывод скриптов иначе падает
     steps:
       - uses: actions/checkout@v5
 
