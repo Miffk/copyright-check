@@ -478,6 +478,8 @@ class MainWindow(QMainWindow):
         self.timeline = Timeline()
         self.timeline.setVisible(False)
         self.details = QTextBrowser()
+        self.details_row: int | None = None  # чей результат сейчас показан
+        self.details_text = ""
         self.details.setOpenLinks(False)
         self.details.anchorClicked.connect(QDesktopServices.openUrl)
         self.save_btn = QPushButton("Сохранить отчёт…")
@@ -796,10 +798,21 @@ class MainWindow(QMainWindow):
         if self.selected_row() == row:
             self.show_details()
 
+    def set_details(self, text: str, row: int | None) -> None:
+        """Обновляет панель результата. Пока идёт проверка, она перерисовывается
+        раз в секунду — для того же файла прокрутку оставляем на месте."""
+        if row == self.details_row and text == self.details_text:
+            return
+        bar = self.details.verticalScrollBar()
+        keep = bar.value() if row == self.details_row else 0
+        self.details.setHtml(text)
+        bar.setValue(keep)
+        self.details_row, self.details_text = row, text
+
     def show_placeholder(self) -> None:
         self.timeline.set_result(None)
         self.save_btn.setEnabled(False)
-        self.details.setHtml(
+        self.set_details(
             "<h3>Как пользоваться</h3><ol>"
             "<li>Перетащите в окно трек или готовое видео перед загрузкой на YouTube, "
             "VK, Twitch или стриминг.</li>"
@@ -809,7 +822,7 @@ class MainWindow(QMainWindow):
             "<p>Нужен интернет. Shazam бесплатно принимает около трёх запросов в минуту, "
             "поэтому проверка идёт не мгновенно: трек на 3 минуты тщательно проверяется "
             "примерно за 4 минуты, быстро — примерно за 1 минуту. "
-            "Найденные треки появляются сразу, не дожидаясь конца.</p>")
+            "Найденные треки появляются сразу, не дожидаясь конца.</p>", None)
 
     def show_details(self) -> None:
         row = self.selected_row()
@@ -822,18 +835,18 @@ class MainWindow(QMainWindow):
         partial = job.get("partial")
         self.timeline.set_result(result or partial)
         self.save_btn.setEnabled(result is not None)
+        head = f"<p style='color:gray'>{name}</p>"
         if result is not None:
-            self.details.setHtml(f"<p style='color:gray'>{name}</p>" + result_html(result))
+            body = result_html(result)
         elif job["status"] in ("running", "stopping") and partial is not None:
-            self.details.setHtml(f"<p style='color:gray'>{name}</p>" + result_html(partial, job.get("wait", 0)))
+            body = result_html(partial, job.get("wait", 0))
         elif job["status"] == "failed":
-            self.details.setHtml(
-                f"<p style='color:gray'>{name}</p><h2>Проверка не выполнена</h2>"
-                f"<p>{html.escape(job['error'])}</p>")
+            body = f"<h2>Проверка не выполнена</h2><p>{html.escape(job['error'])}</p>"
         elif job["status"] in ("running", "stopping"):
-            self.details.setHtml(f"<p style='color:gray'>{name}</p><h2>Идёт проверка…</h2><p>Чтение файла</p>")
+            body = "<h2>Идёт проверка…</h2><p>Чтение файла</p>"
         else:
-            self.details.setHtml(f"<p style='color:gray'>{name}</p><h2>В очереди</h2>")
+            body = "<h2>В очереди</h2>"
+        self.set_details(head + body, row)
 
     def save_report(self) -> None:
         row = self.selected_row()
