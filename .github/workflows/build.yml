@@ -50,6 +50,9 @@ jobs:
           Get-Process CopyrightCheck -ErrorAction SilentlyContinue | Format-Table Id, MainWindowTitle
           Stop-Process -Name CopyrightCheck -ErrorAction SilentlyContinue
 
+      - name: Самообновление запущенного exe
+        run: .venv\Scripts\python.exe .github\ci_update_test.py dist\CopyrightCheck.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: CopyrightCheck
@@ -60,4 +63,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $version = .venv\Scripts\python.exe -c "import version; print(version.__version__)"
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Тег $env:GITHUB_REF_NAME не совпадает с версией $version в version.py" }
           gh release create $env:GITHUB_REF_NAME dist/CopyrightCheck.exe --title "Проверка авторских прав $env:GITHUB_REF_NAME" --notes "Скачайте CopyrightCheck.exe и запустите. Python не нужен. Windows может предупредить о неизвестном издателе: «Подробнее» → «Выполнить в любом случае»."

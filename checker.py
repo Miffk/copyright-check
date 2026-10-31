@@ -86,11 +86,20 @@ class CheckResult:
     segments: list[Segment]
     matches: list[Match]
     rate_limited: bool = False
+    unreachable: bool = False  # Shazam не ответил ни разу — нет связи или блокировка
     eta: float = 0  # сколько примерно секунд осталось
 
     @property
     def errors(self) -> int:
         return sum(1 for s in self.segments if s.error)
+
+    @property
+    def checked_ok(self) -> int:
+        return sum(1 for s in self.segments if s.checked and not s.error)
+
+    @property
+    def error_text(self) -> str:
+        return next((s.error for s in self.segments if s.error), "")
 
     @property
     def done(self) -> int:
@@ -222,7 +231,8 @@ async def _recognize_all(
 ) -> None:
     # Повторы по 429 делаем сами, чтобы показывать паузу и не долбить сервер
     client = HTTPClient(retry_options=ExponentialRetry(attempts=3, statuses={500, 502, 503, 504}))
-    shazam = Shazam(language="ru-RU", endpoint_country="RU", http_client=client)
+    # Названия полей метаданных (Album, Label...) parse_track ждёт на английском
+    shazam = Shazam(language="en-US", endpoint_country="GB", http_client=client)
 
     def report(wait: int = 0) -> None:
         result.eta = limiter.eta(len(result.segments) - result.done)
@@ -261,6 +271,13 @@ async def _recognize_all(
                     seg.error = str(exc) or exc.__class__.__name__
                     break
             seg.checked = True
+            if seg.error and i >= 1 and result.checked_ok == 0:
+                # Два отказа подряд с самого начала: Shazam недоступен, дальше нет смысла
+                result.unreachable = True
+                for rest in result.segments[i + 1:]:
+                    rest.error, rest.checked = seg.error, True
+                report()
+                return
             result.matches = group_matches(result.segments)
             report()
     finally:
@@ -288,9 +305,13 @@ def report_text(result: CheckResult) -> str:
     lines = [
         f"Файл: {result.path}",
         f"Длительность: {format_time(result.duration)}",
-        f"Проверено фрагментов: {len(result.segments)}",
+        f"Фрагментов: {len(result.segments)}",
         "",
     ]
+    if result.checked_ok == 0:
+        lines.append("ПРОВЕРКА НЕ ВЫПОЛНЕНА: не удалось связаться с Shazam.")
+        lines.append(f"Ошибка: {result.error_text}")
+        return "\n".join(lines)
     if result.matches:
         lines.append(f"НАЙДЕНЫ СОВПАДЕНИЯ ({len(result.matches)}):")
         for m in result.matches:

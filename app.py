@@ -6,17 +6,21 @@ import html
 import math
 import os
 import sys
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRectF, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPen
+from PySide6.QtCore import QObject, QRectF, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-    QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter,
-    QTableWidget, QTableWidgetItem, QTextBrowser, QToolTip, QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressDialog, QPushButton, QSplitter,
+    QTabWidget, QTableWidget, QTableWidgetItem, QTextBrowser, QToolTip, QVBoxLayout, QWidget,
 )
 
 import checker
+import search
+import updater
+from version import __version__
 
 APP_TITLE = "Проверка авторских прав"
 
@@ -182,6 +186,9 @@ class Timeline(QWidget):
         QToolTip.hideText()
 
 
+VPN_HINT = "В России Shazam может быть недоступен без VPN — включите VPN и проверьте файл ещё раз."
+
+
 def eta_text(seconds: float) -> str:
     minutes = round(seconds / 60)
     return f"{minutes} мин" if minutes >= 1 else f"{math.ceil(seconds)} сек"
@@ -228,10 +235,22 @@ def result_html(result: checker.CheckResult, wait: int | None = None) -> str:
         parts.append("</table>")
     if wait is not None:
         return "".join(parts)
+    total = len(result.segments)
+    error = f"<p style='color:gray'>Текст ошибки: {e(result.error_text)}</p>" if result.error_text else ""
+    if result.checked_ok == 0 and not result.rate_limited:
+        return (
+            f"<h2 style='color:{COLOR_WEAK.name()}'>Проверка не выполнена</h2>"
+            "<p>Не удалось связаться с сервером Shazam, поэтому ни один фрагмент не проверен. "
+            "Результата нет: это <b>не</b> значит, что чужой музыки в файле нет.</p>"
+            f"<p><b>{VPN_HINT}</b></p>{error}")
     if not result.matches:
-        parts.append(f"<h2 style='color:{COLOR_CLEAN.name()}'>✓ Совпадений не найдено</h2>")
+        if result.errors:
+            parts.append(f"<h2 style='color:{COLOR_WEAK.name()}'>Совпадений не найдено "
+                         f"в {result.checked_ok} из {total} фрагментов</h2>")
+        else:
+            parts.append(f"<h2 style='color:{COLOR_CLEAN.name()}'>✓ Совпадений не найдено</h2>")
         parts.append(
-            "<p>Ни один фрагмент не совпал с известными записями. Это хороший знак, "
+            "<p>Ни один проверенный фрагмент не совпал с известными записями. Это хороший знак, "
             "но не гарантия: малоизвестных треков, свежих релизов и библиотек "
             "продакшн-музыки может не быть в базе.</p>")
     if result.rate_limited:
@@ -242,12 +261,162 @@ def result_html(result: checker.CheckResult, wait: int | None = None) -> str:
     elif result.errors:
         parts.append(
             f"<p style='color:{COLOR_WEAK.name()}'>Не удалось проверить фрагментов: {result.errors} "
-            f"из {len(result.segments)} (серые участки на полосе). Проверьте интернет "
-            "и запустите проверку ещё раз.</p>")
+            f"из {total} (серые участки на полосе). Проверьте интернет и запустите проверку "
+            f"ещё раз. {VPN_HINT}</p>{error}")
     parts.append(
         f"<p style='color:gray'>Длительность {checker.format_time(result.duration)}, "
         f"проверено фрагментов: {len(result.segments)}.</p>")
     return "".join(parts)
+
+
+SEARCH_EXAMPLES = ("Imagine Dragons Believer", "Кино Группа крови", "Elektronomia Sky High")
+USAGE_COLORS = {"free": COLOR_CLEAN, "license": COLOR_WEAK, "commercial": COLOR_MATCH}
+USAGE_TITLES = {"free": "Можно использовать на условиях лейбла", "license": "Нужна подписка",
+                "commercial": "Нужна лицензия"}
+
+
+def search_help_html() -> str:
+    examples = " · ".join(f"<a href='example:{i}'>{html.escape(q)}</a>"
+                          for i, q in enumerate(SEARCH_EXAMPLES))
+    return (
+        "<h3>Поиск по названию</h3>"
+        "<p>Введите исполнителя и название песни, и программа найдёт трек в каталоге Deezer "
+        "(больше 100 миллионов записей). Она покажет, кто правообладатель записи, год выпуска, "
+        "ISRC, а также можно ли взять трек в видео.</p>"
+        "<p>Удобно, чтобы проверить трек ещё до монтажа. Если файл уже есть, надёжнее "
+        "проверить сам файл на первой вкладке.</p>"
+        f"<p>Например: {examples}</p>")
+
+
+def search_results_html(query: str, tracks: list[search.FoundTrack], request: int) -> str:
+    e = html.escape
+    if not tracks:
+        return (f"<h3>По запросу «{e(query)}» ничего не найдено</h3>"
+                "<p>Попробуйте написать иначе: исполнитель и название так, как они написаны "
+                "на обложке, без лишних слов вроде «скачать» или «песня».</p>")
+    parts = [f"<p style='color:gray'>Найдено по запросу «{e(query)}»: {len(tracks)}</p>"]
+    for i, t in enumerate(tracks):
+        level, note = t.usage()
+        color = USAGE_COLORS[level].name()
+        cover = (f"<img src='cover:{request}-{i}' width='56' height='56'>" if t.cover else "")
+        meta = " · ".join(x for x in (t.album, t.released[:4], checker.format_time(t.duration) if t.duration else "") if x)
+        links = [f"<a href='{e(t.link)}'>Открыть в Deezer</a>"] if t.link else []
+        if t.preview:
+            links.append(f"<a href='{e(t.preview)}'>Послушать 30 сек</a>")
+        parts.append(
+            "<table cellpadding='4' cellspacing='0' style='margin-top:10px'><tr>"
+            f"<td valign='top' width='64'>{cover}</td><td valign='top'>"
+            f"<b style='font-size:large'>{e(t.artist)} — {e(t.title)}</b><br>"
+            f"<span style='color:gray'>{e(meta)}</span><br>"
+            + (f"Правообладатель записи: <b>{e(t.label)}</b><br>" if t.label else "")
+            + (f"ISRC: {e(t.isrc)}<br>" if t.isrc else "")
+            + f"<span style='color:{color}'><b>{USAGE_TITLES[level]}.</b> {e(note)}</span><br>"
+            + " &nbsp; ".join(links)
+            + "</td></tr></table>")
+    parts.append(
+        "<p style='color:gray'>Данные каталога Deezer. Кроме правообладателя записи, права на саму "
+        "песню (музыку и текст) есть у авторов и издателей, поэтому кавер или своё исполнение "
+        "чужой песни тоже требует разрешения.</p>")
+    return "".join(parts)
+
+
+class CoverBrowser(QTextBrowser):
+    """QTextBrowser, который берёт обложки из памяти, а не из сети."""
+
+    def __init__(self):
+        super().__init__()
+        self.images: dict[str, QImage] = {}
+
+    def loadResource(self, kind, url):
+        if url.scheme() == "cover":
+            return self.images.get(url.toString())
+        return super().loadResource(kind, url)
+
+
+class SearchSignals(QObject):
+    done = Signal(int, str, object)
+    failed = Signal(int, str)
+
+
+class SearchTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.request = 0
+        self.signals = SearchSignals()
+        self.signals.done.connect(self.on_done)
+        self.signals.failed.connect(self.on_failed)
+
+        self.query = QLineEdit()
+        self.query.setPlaceholderText("Исполнитель и название, например: Imagine Dragons Believer")
+        self.query.setClearButtonEnabled(True)
+        self.query.returnPressed.connect(self.run)
+        font = self.query.font()
+        font.setPointSize(font.pointSize() + 2)
+        self.query.setFont(font)
+        self.query.setMinimumHeight(36)
+        self.button = QPushButton("Найти")
+        self.button.setMinimumHeight(36)
+        self.button.clicked.connect(self.run)
+        row = QHBoxLayout()
+        row.addWidget(self.query, 1)
+        row.addWidget(self.button)
+
+        self.results = CoverBrowser()
+        self.results.setOpenLinks(False)
+        self.results.anchorClicked.connect(self.open_link)
+        self.results.setHtml(search_help_html())
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(row)
+        layout.addWidget(self.results, 1)
+
+    def open_link(self, url: QUrl) -> None:
+        if url.scheme() == "example":
+            self.query.setText(SEARCH_EXAMPLES[int(url.path())])
+            self.run()
+        else:
+            QDesktopServices.openUrl(url)
+
+    def run(self) -> None:
+        text = self.query.text().strip()
+        if not text:
+            self.query.setFocus()
+            return
+        self.request += 1
+        self.button.setEnabled(False)
+        self.results.setHtml(f"<h3>Ищу «{html.escape(text)}»…</h3>")
+        threading.Thread(target=self._work, args=(self.request, text), daemon=True).start()
+
+    def _work(self, request: int, text: str) -> None:
+        try:
+            self.signals.done.emit(request, text, search.search_tracks(text))
+        except Exception as exc:
+            self.signals.failed.emit(request, str(exc) or exc.__class__.__name__)
+
+    def on_done(self, request: int, text: str, tracks: list[search.FoundTrack]) -> None:
+        if request != self.request:  # пришёл ответ на старый запрос
+            return
+        self.button.setEnabled(True)
+        self.results.images = {
+            f"cover:{request}-{i}": QImage.fromData(t.cover) for i, t in enumerate(tracks) if t.cover}
+        self.results.setHtml(search_results_html(text, tracks, request))
+
+    def on_failed(self, request: int, message: str) -> None:
+        if request != self.request:
+            return
+        self.button.setEnabled(True)
+        self.results.setHtml(
+            "<h3>Не удалось выполнить поиск</h3>"
+            f"<p>{html.escape(message)}</p><p>Проверьте интернет и попробуйте ещё раз. "
+            "Каталог Deezer в России может быть недоступен без VPN.</p>")
+
+
+class UpdateSignals(QObject):
+    checked = Signal(object, bool)  # релиз, проверка по кнопке
+    check_failed = Signal(str, bool)
+    progress = Signal(int, int)
+    downloaded = Signal(object)
+    download_failed = Signal(str)  # пустая строка — отменено
 
 
 class MainWindow(QMainWindow):
@@ -329,14 +498,162 @@ class MainWindow(QMainWindow):
         disclaimer.setWordWrap(True)
         disclaimer.setStyleSheet("color: gray;")
 
-        central = QWidget()
-        layout = QVBoxLayout(central)
+        file_tab = QWidget()
+        layout = QVBoxLayout(file_tab)
         layout.addWidget(self.drop)
         layout.addLayout(controls)
         layout.addWidget(splitter, 1)
         layout.addWidget(disclaimer)
+
+        self.search_tab = SearchTab()
+        self.tabs = QTabWidget()
+        self.tabs.addTab(file_tab, "Проверка файла")
+        self.tabs.addTab(self.search_tab, "Поиск по названию")
+
+        self.setup_updates()
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.addWidget(self.update_banner)
+        central_layout.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self.show_placeholder()
+
+    # --- обновления ---
+
+    def setup_updates(self) -> None:
+        self.available: updater.Release | None = None
+        self.update_cancel = False
+        self.update_dialog: QProgressDialog | None = None
+        self.update_signals = UpdateSignals()
+        self.update_signals.checked.connect(self.on_update_checked)
+        self.update_signals.check_failed.connect(self.on_update_check_failed)
+        self.update_signals.progress.connect(self.on_update_progress)
+        self.update_signals.downloaded.connect(self.on_update_downloaded)
+        self.update_signals.download_failed.connect(self.on_update_failed)
+
+        self.update_banner = QFrame()
+        self.update_banner.setObjectName("updateBanner")
+        self.update_label = QLabel()
+        self.update_label.setOpenExternalLinks(True)
+        self.update_btn = QPushButton("Обновить")
+        self.update_btn.clicked.connect(self.start_update)
+        later = QPushButton("Позже")
+        later.clicked.connect(self.update_banner.hide)
+        banner = QHBoxLayout(self.update_banner)
+        banner.addWidget(self.update_label, 1)
+        banner.addWidget(self.update_btn)
+        banner.addWidget(later)
+        self.update_banner.hide()
+
+        self.check_btn = QPushButton("Проверить обновления")
+        self.check_btn.setFlat(True)
+        self.check_btn.clicked.connect(lambda: self.check_updates(manual=True))
+        self.statusBar().addWidget(QLabel(f"Версия {__version__}"))
+        self.statusBar().addPermanentWidget(self.check_btn)
+        QTimer.singleShot(1500, lambda: self.check_updates(manual=False))
+
+    def check_updates(self, manual: bool) -> None:
+        self.check_btn.setEnabled(False)
+        self.check_btn.setText("Проверяю…")
+        threading.Thread(target=self._check_work, args=(manual,), daemon=True).start()
+
+    def _check_work(self, manual: bool) -> None:
+        try:
+            self.update_signals.checked.emit(updater.latest_release(), manual)
+        except Exception as exc:
+            self.update_signals.check_failed.emit(str(exc) or exc.__class__.__name__, manual)
+
+    def _reset_check_button(self) -> None:
+        self.check_btn.setEnabled(True)
+        self.check_btn.setText("Проверить обновления")
+
+    def on_update_checked(self, release: updater.Release, manual: bool) -> None:
+        self._reset_check_button()
+        if not updater.is_newer(release.version):
+            if manual:
+                QMessageBox.information(self, APP_TITLE, f"У вас последняя версия ({__version__}).")
+            return
+        self.available = release
+        self.update_label.setText(
+            f"<b>Вышла новая версия {html.escape(release.version)}</b> (у вас {__version__}). "
+            f"<a href='{html.escape(release.page)}'>Что нового</a>")
+        self_update = updater.can_self_update() and bool(release.download_url)
+        self.update_btn.setText("Обновить" if self_update else "Скачать")
+        self.update_banner.show()
+
+    def on_update_check_failed(self, message: str, manual: bool) -> None:
+        self._reset_check_button()
+        if manual:
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось проверить обновления.\n\n{message}")
+
+    def start_update(self) -> None:
+        release = self.available
+        if release is None:
+            return
+        if not (updater.can_self_update() and release.download_url):
+            # Запуск из исходников или папка без прав на запись: качаем вручную
+            QDesktopServices.openUrl(QUrl(release.page))
+            return
+        if self.thread is not None:
+            QMessageBox.information(
+                self, APP_TITLE, "Сейчас идёт проверка файлов. Дождитесь её окончания "
+                "или нажмите «Остановить», а потом обновитесь.")
+            return
+        self.update_cancel = False
+        dialog = QProgressDialog("Скачиваю новую версию…", "Отмена", 0, 100, self)
+        dialog.setWindowTitle(APP_TITLE)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(lambda: setattr(self, "update_cancel", True))
+        dialog.show()
+        self.update_dialog = dialog
+        threading.Thread(target=self._download_work, args=(release,), daemon=True).start()
+
+    def _download_work(self, release: updater.Release) -> None:
+        try:
+            path = updater.download(
+                release,
+                progress=lambda done, total: self.update_signals.progress.emit(done, total),
+                cancelled=lambda: self.update_cancel,
+            )
+        except updater.UpdateCancelled:
+            self.update_signals.download_failed.emit("")
+        except Exception as exc:
+            self.update_signals.download_failed.emit(str(exc) or exc.__class__.__name__)
+        else:
+            self.update_signals.downloaded.emit(path)
+
+    def on_update_progress(self, done: int, total: int) -> None:
+        if self.update_dialog and total:
+            self.update_dialog.setValue(int(done * 100 / total))
+            self.update_dialog.setLabelText(
+                f"Скачиваю новую версию… {done // 1048576} из {total // 1048576} МБ")
+
+    def _close_update_dialog(self) -> None:
+        if self.update_dialog:
+            self.update_dialog.canceled.disconnect()
+            self.update_dialog.close()
+            self.update_dialog = None
+
+    def on_update_downloaded(self, path) -> None:
+        self._close_update_dialog()
+        try:
+            updater.install_and_restart(path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, APP_TITLE, f"Не удалось заменить файл программы:\n{exc}\n\n"
+                "Откроется страница загрузки — скачайте новую версию вручную.")
+            QDesktopServices.openUrl(QUrl(self.available.page))
+            return
+        QApplication.quit()
+
+    def on_update_failed(self, message: str) -> None:
+        self._close_update_dialog()
+        if message:
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось скачать обновление.\n\n{message}")
 
     # --- очередь проверок ---
 
@@ -407,6 +724,8 @@ class MainWindow(QMainWindow):
             strong = sum(1 for m in result.matches if not m.weak)
             text = f"⚠ Найдено треков: {len(result.matches)}"
             color = COLOR_MATCH if strong else COLOR_WEAK
+        elif result.checked_ok == 0 and not result.rate_limited:
+            text, color = "Нет связи с Shazam", COLOR_WEAK
         elif result.errors:
             text, color = f"Не проверено фрагментов: {result.errors}", COLOR_WEAK
         else:
@@ -529,10 +848,17 @@ STYLE = """
     border-color: palette(highlight);
     background: palette(alternate-base);
 }
+#updateBanner {
+    border: 1px solid palette(highlight);
+    border-radius: 8px;
+    background: palette(alternate-base);
+    margin: 6px 6px 0 6px;
+}
 """
 
 
 def main() -> None:
+    updater.cleanup_previous()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
     app.setStyleSheet(STYLE)
