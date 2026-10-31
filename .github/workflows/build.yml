@@ -13,9 +13,9 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -38,7 +38,7 @@ jobs:
 
       - name: Сборка через «Собрать exe.bat»
         run: |
-          cmd /c "Собрать exe.bat <nul"
+          '' | & '.\Собрать exe.bat'
           if (-not (Test-Path dist\CopyrightCheck.exe)) { throw "exe не собран" }
           Get-Item dist\CopyrightCheck.exe | Format-List Name, Length
 
